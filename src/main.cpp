@@ -222,16 +222,15 @@ void setup() {
   delay(1000);
   Serial.println("\nBPI-R4 UART Bridge v" FIRMWARE_VERSION);
   
-  // Init UART
-  initUart();
-  
-  // Load config from flash
+  // Load config from flash BEFORE initing UART
   prefs.begin("uart-bridge", true);
   wifi_ssid = prefs.getString("ssid", "");
   wifi_pass = prefs.getString("pass", "");
   uart_baud = prefs.getUInt("baud", UART_BAUD_DEFAULT);
   prefs.end();
   
+  // Init UART with correct baud from config
+  initUart();
   // Connect or start AP
   if (wifi_ssid.length() > 0) {
     if (!connectWiFi(wifi_ssid, wifi_pass)) {
@@ -273,7 +272,7 @@ void loop() {
     uint8_t buf[128];
     size_t len = Serial2.readBytes(buf, sizeof(buf));
     if (len > 0) {
-      webSocket.broadcastBIN(buf, len);
+      webSocket.broadcastTXT((char*)buf, len);
       if (tcpClient.connected()) {
         tcpClient.write(buf, len);
       }
