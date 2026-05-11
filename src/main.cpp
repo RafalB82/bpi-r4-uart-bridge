@@ -21,6 +21,7 @@
 #include <WebSocketsServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
+#include <freertos/ringbuf.h>
 #include <vector>
 
 #define FIRMWARE_VERSION "1.2"
@@ -458,8 +459,9 @@ void loop() {
 
   // Ensure mDNS is running after reconnect
   if (WiFi.status() == WL_CONNECTED) {
-    if (!MDNS.isRunning()) {
-      MDNS.begin(HOSTNAME);
+    // Start mDNS if not yet running
+    MDNS.end();
+    if (MDNS.begin(HOSTNAME)) {
       MDNS.addService("http", "tcp", HTTP_PORT);
       MDNS.addService("ws", "tcp", WEBSOCKET_PORT);
     }
