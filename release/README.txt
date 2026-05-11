@@ -9,6 +9,7 @@ FEATURES
 - Web UI at http://bpi-r4-bridge.local/ with serial terminal in browser
 - TCP serial bridge on port 8888 (for remote access)
 - Configuration saved in flash
+- mDNS: bpi-r4-bridge.local
 
 CONNECTIONS
   BPI-R4 (26pin header)   ->   ESP32 Dev Board
@@ -35,3 +36,16 @@ USAGE
 
 DEFAULT CREDENTIALS
   AP mode (first boot / WiFi failure): BPI-R4-Bridge / config1234
+
+CHANGELOG
+  v1.3 - fix: mDNS no longer restarted every loop iteration
+         fix: UART read buffer enlarged from 256 to 4096 bytes
+         fix: TCP client vector pre-reserved (no heap reallocs)
+         fix: WiFiEvent logs AP client connect/disconnect
+         fix: vTaskDelay(1) instead of delay(1) for proper FreeRTOS yield
+  v1.2 - mDNS hostname (bpi-r4-bridge.local)
+         NVS baud rate validation
+         Increased UART RX buffer
+  v1.1 - TCP bridge on port 8888
+         Multi-client support
+  v1.0 - Initial release
