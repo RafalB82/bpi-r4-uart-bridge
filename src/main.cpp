@@ -11,8 +11,11 @@
  *   Pin 10 (UART0 RX)-> GPIO17 (TX2)
  *   Pin 9 (GND)      -> GND
  *
- * v1.2 - mDNS hostname (bpi-r4-bridge.local), cleaned release/README,
- *        NVS baud validation, increased UART RX buffer.
+ * v1.3 - fix: mDNS no longer restarted every loop iteration (flag mdnsRunning),
+ *        fix: UART RX read buffer enlarged to UART_RX_BUF_SIZE (was 256),
+ *        fix: tcpClients vector pre-reserved to MAX_TCP_CLIENTS,
+ *        fix: WiFiEvent logs AP client connect/disconnect events,
+ *        fix: loop uses vTaskDelay(1) instead of delay(1).
  */
 
 #include <Arduino.h>
@@ -24,14 +27,14 @@
 #include <freertos/ringbuf.h>
 #include <vector>
 
-#define FIRMWARE_VERSION "1.2"
+#define FIRMWARE_VERSION "1.3"
 #define TCP_PORT 8888
 #define HTTP_PORT 80
 #define WEBSOCKET_PORT 81
 #define UART_BAUD_DEFAULT 115200
 #define UART_RX_PIN 16
 #define UART_TX_PIN 17
-#define UART_BUF_SIZE 256
+#define UART_BUF_SIZE 4096
 #define UART_RX_BUF_SIZE 4096
 #define HOSTNAME "bpi-r4-bridge"
 #define WIFI_TIMEOUT_MS 20000
@@ -42,6 +45,7 @@ WebServer server(HTTP_PORT);
 WebSocketsServer webSocket(WEBSOCKET_PORT);
 WiFiServer tcpServer(TCP_PORT);
 std::vector<WiFiClient> tcpClients;
+bool mdnsRunning = false;
 
 String wifi_ssid, wifi_pass;
 unsigned long uart_baud = UART_BAUD_DEFAULT;
@@ -81,7 +85,7 @@ button:hover{background:#c73650}
 .page.active{display:block}
 </style>
 </head><body>
-<h1>BPI-R4 UART Bridge v1.2</h1>
+<h1>BPI-R4 UART Bridge v1.3</h1>
 <p>IP: <span id="ip">---</span> | TCP: <span id="tcp">port 8888</span></p>
 <div class="tabs">
 <button class="tab active" onclick="showPage('terminal')">Terminal</button>
@@ -338,9 +342,16 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       Serial.println("WiFi disconnected, scheduling reconnect check");
       wifiReconnectMs = millis() + 5000;  // try reconnect in 5s
+      mdnsRunning = false;
       break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       wifiReconnectMs = 0;
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      Serial.println("AP: client connected");
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+      Serial.println("AP: client disconnected");
       break;
     default:
       break;
@@ -427,7 +438,11 @@ void setup() {
   tcpServer.setNoDelay(true);
   Serial.printf("TCP bridge on port %d (max %d clients)\n", TCP_PORT, MAX_TCP_CLIENTS);
 
+  // Pre-reserve TCP client slots to avoid repeated heap reallocs
+  tcpClients.reserve(MAX_TCP_CLIENTS);
+
   wifiWasConnected = (WiFi.status() == WL_CONNECTED);
+  mdnsRunning = (WiFi.status() == WL_CONNECTED);
 }
 
 // ====== Loop ======
@@ -443,11 +458,10 @@ void loop() {
   acceptTcpClients();
   handleTcpToUart();
 
-  // UART -> WebSocket + TCP (read all available at once)
+  // UART -> WebSocket + TCP (read all available, up to full RX buffer size)
   size_t avail = Serial2.available();
   if (avail > 0) {
-    // Use a stack buffer large enough
-    uint8_t buf[UART_BUF_SIZE];
+    static uint8_t buf[UART_BUF_SIZE];
     size_t len = Serial2.readBytes(buf, min(avail, (size_t)UART_BUF_SIZE));
     if (len > 0) {
       broadcastUart(buf, len);
@@ -457,16 +471,16 @@ void loop() {
   // WiFi reconnect check
   checkReconnect();
 
-  // Ensure mDNS is running after reconnect
-  if (WiFi.status() == WL_CONNECTED) {
-    // Start mDNS if not yet running
-    MDNS.end();
+  // Start mDNS once after (re)connect — not every iteration
+  if (WiFi.status() == WL_CONNECTED && !mdnsRunning) {
     if (MDNS.begin(HOSTNAME)) {
       MDNS.addService("http", "tcp", HTTP_PORT);
       MDNS.addService("ws", "tcp", WEBSOCKET_PORT);
+      Serial.printf("mDNS (re)started: http://%s.local/\n", HOSTNAME);
+      mdnsRunning = true;
     }
   }
 
-  // Brief yield to watchdog/FreeRTOS
-  delay(1);
+  // Yield to FreeRTOS scheduler / watchdog
+  vTaskDelay(1);
 }
