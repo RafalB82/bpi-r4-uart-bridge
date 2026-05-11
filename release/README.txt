@@ -5,8 +5,8 @@ This firmware turns an ESP32 into a WiFi-to-serial bridge for debugging
 the Banana Pi BPI-R4 via UART console.
 
 FEATURES
-- WiFi connection: REDACTED_WIFI / REDACTED_PASSWORD (configurable via web)
-- Web UI at http://esp32-ip/ with serial terminal in browser
+- WiFi connection configured via web UI on first boot (AP mode)
+- Web UI at http://bpi-r4-bridge.local/ with serial terminal in browser
 - TCP serial bridge on port 8888 (for remote access)
 - Configuration saved in flash
 
@@ -28,12 +28,10 @@ Or using PlatformIO:
   pio run --target upload
 
 USAGE
-1. Power on ESP32 - it connects to WiFi REDACTED_WIFI
-2. Find its IP from router DHCP list
-3. Open http://esp32-ip/ in browser
-4. Connect via TCP: nc esp32-ip 8888
-5. BPI-R4 bootlog appears in terminal
+1. Power on ESP32 - connects to configured WiFi (or starts AP on first boot)
+2. Open http://bpi-r4-bridge.local/ in browser (or use router's DHCP list for IP)
+3. Connect via TCP: nc bpi-r4-bridge.local 8888
+4. BPI-R4 bootlog appears in terminal
 
 DEFAULT CREDENTIALS
-  WiFi: REDACTED_WIFI / REDACTED_PASSWORD
-  Config AP (if WiFi fails): BPI-R4-Bridge / config1234
+  AP mode (first boot / WiFi failure): BPI-R4-Bridge / config1234

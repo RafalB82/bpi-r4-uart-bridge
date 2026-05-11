@@ -13,7 +13,7 @@ ESP32 firmware that turns your ESP32 into a WiFi-to-UART bridge for debugging th
 ## First use
 
 1. Flash the firmware (see below)
-2. Connect to ESP32 AP: `BPI-R4-Bridge` (no password)
+2. Connect to ESP32 AP: `BPI-R4-Bridge` (password: `config1234`)
 3. Open http://192.168.4.1/
 4. Go to WiFi Config, enter your network credentials
 5. ESP32 reboots and connects to your WiFi
@@ -26,6 +26,10 @@ BPI-R4 (26pin header)   ESP32 Dev Board
   pin 10 (UART0 RX)   -> GPIO17 (TX2)
   pin 9  (GND)         -> GND
 ```
+
+> **mDNS:** Once connected to WiFi, reach the bridge at **http://bpi-r4-bridge.local/**
+>
+> Or via TCP: `nc bpi-r4-bridge.local 8888`
 
 ## Flash
 

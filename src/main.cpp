@@ -11,8 +11,8 @@
  *   Pin 10 (UART0 RX)-> GPIO17 (TX2)
  *   Pin 9 (GND)      -> GND
  *
- * v1.1 - multi TCP clients, WiFi reconnect/events, no race on UART,
- *        proper restart after WiFi config change, NVS baud config in UI.
+ * v1.2 - mDNS hostname (bpi-r4-bridge.local), cleaned release/README,
+ *        NVS baud validation, increased UART RX buffer.
  */
 
 #include <Arduino.h>
@@ -20,9 +20,10 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <Preferences.h>
+#include <ESPmDNS.h>
 #include <vector>
 
-#define FIRMWARE_VERSION "1.1"
+#define FIRMWARE_VERSION "1.2"
 #define TCP_PORT 8888
 #define HTTP_PORT 80
 #define WEBSOCKET_PORT 81
@@ -30,6 +31,8 @@
 #define UART_RX_PIN 16
 #define UART_TX_PIN 17
 #define UART_BUF_SIZE 256
+#define UART_RX_BUF_SIZE 4096
+#define HOSTNAME "bpi-r4-bridge"
 #define WIFI_TIMEOUT_MS 20000
 #define MAX_TCP_CLIENTS 4
 
@@ -171,7 +174,7 @@ document.getElementById('bf').addEventListener('submit', function(e){
 
 // ====== UART init ======
 void initUart() {
-  Serial2.setRxBufferSize(UART_BUF_SIZE * 4);
+  Serial2.setRxBufferSize(UART_RX_BUF_SIZE);
   Serial2.begin(uart_baud, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   Serial.println("UART2 ready: " + String(uart_baud) + " baud");
 }
@@ -179,19 +182,23 @@ void initUart() {
 // ====== AP mode ======
 void startAP() {
   WiFi.mode(WIFI_AP);
-  WiFi.softAP("BPI-R4-Bridge", NULL);
+  WiFi.softAP("BPI-R4-Bridge", "config1234");
   Serial.println("AP started: BPI-R4-Bridge");
   Serial.println("AP IP: " + WiFi.softAPIP().toString());
+  Serial.println("Connect and open http://192.168.4.1/");
 }
 
-// ====== WiFi connect with timeout ======
+// ====== WiFi connect with hostname + timeout ======
 bool connectWiFi(String ssid, String pass) {
   if (ssid.length() == 0) return false;
+
+  // Set hostname before WiFi.begin() so DHCP sees it
+  WiFi.setHostname(HOSTNAME);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pass.c_str());
 
-  Serial.print("Connecting to WiFi");
+  Serial.print("Connecting to WiFi \"" + ssid + "\" as " + String(HOSTNAME));
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_TIMEOUT_MS) {
     delay(200);
@@ -201,6 +208,7 @@ bool connectWiFi(String ssid, String pass) {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("Connected: " + WiFi.localIP().toString());
+    Serial.println("Hostname: " + String(HOSTNAME) + ".local");
     return true;
   }
   Serial.println("Failed to connect");
@@ -363,6 +371,12 @@ void setup() {
   uart_baud = prefs.getUInt("baud", UART_BAUD_DEFAULT);
   prefs.end();
 
+  // Validate baud rate from NVS (could be corrupted)
+  if (uart_baud < 1200 || uart_baud > 921600) {
+    uart_baud = UART_BAUD_DEFAULT;
+    Serial.println("Invalid baud in NVS, falling back to " + String(uart_baud));
+  }
+
   // Create UART TX queue
   uart_tx_queue = xRingbufferCreate(UART_BUF_SIZE * 8, RINGBUF_TYPE_BYTEBUF);
   if (!uart_tx_queue) {
@@ -372,7 +386,7 @@ void setup() {
   // Init UART
   initUart();
 
-  // WiFi event handler
+  // WiFi event handler (before connect, to catch GOT_IP for mDNS)
   WiFi.onEvent(WiFiEvent);
 
   // Connect or start AP
@@ -382,6 +396,17 @@ void setup() {
     }
   } else {
     startAP();
+  }
+
+  // Start mDNS if we got an IP (STA mode)
+  if (WiFi.status() == WL_CONNECTED) {
+    if (MDNS.begin(HOSTNAME)) {
+      MDNS.addService("http", "tcp", HTTP_PORT);
+      MDNS.addService("ws", "tcp", WEBSOCKET_PORT);
+      Serial.printf("mDNS responder started: http://%s.local/\n", HOSTNAME);
+    } else {
+      Serial.println("mDNS responder failed to start");
+    }
   }
 
   // Web server
@@ -430,6 +455,15 @@ void loop() {
 
   // WiFi reconnect check
   checkReconnect();
+
+  // Ensure mDNS is running after reconnect
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!MDNS.isRunning()) {
+      MDNS.begin(HOSTNAME);
+      MDNS.addService("http", "tcp", HTTP_PORT);
+      MDNS.addService("ws", "tcp", WEBSOCKET_PORT);
+    }
+  }
 
   // Brief yield to watchdog/FreeRTOS
   delay(1);
