@@ -81,7 +81,7 @@ button:hover{background:#c73650}
 .page.active{display:block}
 </style>
 </head><body>
-<h1>BPI-R4 UART Bridge v""" FIRMWARE_VERSION R"""</h1>
+<h1>BPI-R4 UART Bridge v1.2</h1>
 <p>IP: <span id="ip">---</span> | TCP: <span id="tcp">port 8888</span></p>
 <div class="tabs">
 <button class="tab active" onclick="showPage('terminal')">Terminal</button>
