@@ -11,6 +11,15 @@
  *   Pin 10 (UART0 RX)-> GPIO17 (TX2)
  *   Pin 9 (GND)      -> GND
  *
+ * v1.4 - fix: XSS in /status.json (proper JSON escaping),
+ *        fix: removed dead pendingRestart variable,
+ *        fix: safe restart via flag + loop drain (no more delay+restart race),
+ *        fix: erase-remove idiom for TCP client pruning,
+ *        fix: static buffer for TCP->UART reads (stack safety),
+ *        fix: non-printable filtering in broadcastUart (valid UTF-8 for WS),
+ *        fix: ring buffer full warning logged,
+ *        fix: SSID/password length validation (WPA2 limits),
+ *        fix: Task Watchdog enabled for loop stability.
  * v1.3 - fix: mDNS no longer restarted every loop iteration (flag mdnsRunning),
  *        fix: UART RX read buffer enlarged to UART_RX_BUF_SIZE (was 256),
  *        fix: tcpClients vector pre-reserved to MAX_TCP_CLIENTS,
@@ -25,9 +34,11 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <freertos/ringbuf.h>
+#include <esp_task_wdt.h>
 #include <vector>
+#include <algorithm>
 
-#define FIRMWARE_VERSION "1.3"
+#define FIRMWARE_VERSION "1.4"
 #define TCP_PORT 8888
 #define HTTP_PORT 80
 #define WEBSOCKET_PORT 81
@@ -40,6 +51,10 @@
 #define WIFI_TIMEOUT_MS 20000
 #define MAX_TCP_CLIENTS 4
 
+#define WDT_TIMEOUT_S 10
+#define MAX_SSID_LEN 32
+#define MAX_PASS_LEN 63
+
 Preferences prefs;
 WebServer server(HTTP_PORT);
 WebSocketsServer webSocket(WEBSOCKET_PORT);
@@ -51,7 +66,7 @@ String wifi_ssid, wifi_pass;
 unsigned long uart_baud = UART_BAUD_DEFAULT;
 unsigned long wifiReconnectMs = 0;
 bool wifiWasConnected = false;
-bool pendingRestart = false;
+unsigned long restartRequestedMs = 0;  // non-zero = restart pending
 
 // Queue for WebSocket -> UART data (avoids race in callback)
 static RingbufHandle_t uart_tx_queue = NULL;
@@ -85,7 +100,7 @@ button:hover{background:#c73650}
 .page.active{display:block}
 </style>
 </head><body>
-<h1>BPI-R4 UART Bridge v1.3</h1>
+<h1>BPI-R4 UART Bridge v1.4</h1>
 <p>IP: <span id="ip">---</span> | TCP: <span id="tcp">port 8888</span></p>
 <div class="tabs">
 <button class="tab active" onclick="showPage('terminal')">Terminal</button>
@@ -184,6 +199,34 @@ void initUart() {
   Serial.println("UART2 ready: " + String(uart_baud) + " baud");
 }
 
+// ====== JSON string escaping (prevents XSS / malformed JSON) ======
+String jsonEscape(const String& input) {
+  String out;
+  out.reserve(input.length() + 8);
+  for (unsigned int i = 0; i < input.length(); i++) {
+    char c = input[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '/':  out += "\\/"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
 // ====== AP mode ======
 void startAP() {
   WiFi.mode(WIFI_AP);
@@ -224,7 +267,7 @@ bool connectWiFi(String ssid, String pass) {
 void handleRoot() { server.send_P(200, "text/html", index_html); }
 
 void handleStatus() {
-  String json = "{\"ssid\":\"" + wifi_ssid + "\",\"ip\":\"" +
+  String json = "{\"ssid\":\"" + jsonEscape(wifi_ssid) + "\",\"ip\":\"" +
     (WiFi.getMode() == WIFI_STA ? WiFi.localIP().toString() : WiFi.softAPIP().toString()) +
     "\",\"mode\":\"" + String(WiFi.getMode() == WIFI_STA ? "STA" : "AP") +
     "\",\"baud\":\"" + String(uart_baud) + "\"}";
@@ -239,6 +282,18 @@ void handleConnect() {
     server.send(400, "text/plain", "SSID required");
     return;
   }
+  if (ssid.length() > MAX_SSID_LEN) {
+    server.send(400, "text/plain", "SSID too long (max 32 chars)");
+    return;
+  }
+  if (pass.length() > MAX_PASS_LEN) {
+    server.send(400, "text/plain", "Password too long (max 63 chars)");
+    return;
+  }
+  if (pass.length() > 0 && pass.length() < 8) {
+    server.send(400, "text/plain", "Password too short (min 8 chars for WPA2)");
+    return;
+  }
 
   prefs.begin("uart-bridge", false);
   prefs.putString("ssid", ssid);
@@ -246,8 +301,7 @@ void handleConnect() {
   prefs.end();
 
   server.send(200, "text/plain", "Saved. Rebooting...");
-  delay(500);
-  ESP.restart();
+  restartRequestedMs = millis();
 }
 
 void handleBaud() {
@@ -256,8 +310,8 @@ void handleBaud() {
     return;
   }
   unsigned long baud = server.arg("baud").toInt();
-  if (baud < 1200) {
-    server.send(400, "text/plain", "Invalid baud rate");
+  if (baud < 1200 || baud > 921600) {
+    server.send(400, "text/plain", "Invalid baud rate (1200-921600)");
     return;
   }
 
@@ -266,8 +320,7 @@ void handleBaud() {
   prefs.end();
 
   server.send(200, "text/plain", "Baud saved. Rebooting...");
-  delay(500);
-  ESP.restart();
+  restartRequestedMs = millis();
 }
 
 void handleNotFound() { server.send(404, "text/plain", "Not found"); }
@@ -276,7 +329,9 @@ void handleNotFound() { server.send(404, "text/plain", "Not found"); }
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t len) {
   if (type == WStype_TEXT && len > 0 && uart_tx_queue) {
     // Queue data; loop will drain it and write to Serial2
-    xRingbufferSend(uart_tx_queue, payload, len, 0);
+    if (xRingbufferSend(uart_tx_queue, payload, len, 0) != pdTRUE) {
+      Serial.println("WARN: UART TX queue full, data dropped");
+    }
   }
 }
 
@@ -294,14 +349,19 @@ void flushUartTxQueue() {
   }
 }
 
-// ====== Clean dead TCP clients ======
+// ====== Clean dead TCP clients (erase-remove idiom) ======
 void pruneTcpClients() {
-  for (int i = tcpClients.size() - 1; i >= 0; i--) {
-    if (!tcpClients[i].connected()) {
-      tcpClients[i].stop();
-      tcpClients.erase(tcpClients.begin() + i);
-    }
-  }
+  tcpClients.erase(
+    std::remove_if(tcpClients.begin(), tcpClients.end(),
+      [](WiFiClient& c) {
+        if (!c.connected()) {
+          c.stop();
+          return true;
+        }
+        return false;
+      }),
+    tcpClients.end()
+  );
 }
 
 // ====== Accept new TCP clients (up to MAX_TCP_CLIENTS) ======
@@ -315,21 +375,36 @@ void acceptTcpClients() {
 }
 
 // ====== Broadcast UART data to all WebSocket + TCP clients ======
+// Filters out non-printable characters (except common control chars) for WebSocket
 void broadcastUart(const uint8_t* buf, size_t len) {
-  webSocket.broadcastTXT((const char*)buf, len);
+  // For TCP clients: send raw (they can handle binary)
   for (auto& c : tcpClients) {
     if (c.connected()) c.write(buf, len);
+  }
+
+  // For WebSocket: filter to valid printable + whitespace for safe browser display
+  static uint8_t wsBuf[UART_BUF_SIZE];
+  size_t wsLen = 0;
+  for (size_t i = 0; i < len && wsLen < sizeof(wsBuf) - 1; i++) {
+    uint8_t ch = buf[i];
+    // Allow printable ASCII, newline, carriage return, tab, and ESC (for ANSI sequences)
+    if (ch >= 0x20 || ch == '\n' || ch == '\r' || ch == '\t' || ch == 0x1B) {
+      wsBuf[wsLen++] = ch;
+    }
+  }
+  if (wsLen > 0) {
+    webSocket.broadcastTXT(wsBuf, wsLen);
   }
 }
 
 // ====== Read from all TCP clients and write to UART ======
 void handleTcpToUart() {
+  static uint8_t buf[512];  // Static buffer - safe for stack, shared across calls
   for (auto& c : tcpClients) {
     if (!c.connected()) continue;
     int available = c.available();
     if (available <= 0) continue;
-    uint8_t buf[UART_BUF_SIZE];
-    int len = c.read(buf, min(available, UART_BUF_SIZE));
+    int len = c.read(buf, min(available, (int)sizeof(buf)));
     if (len > 0) {
       Serial2.write(buf, len);
     }
@@ -375,6 +450,10 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\nBPI-R4 UART Bridge v" FIRMWARE_VERSION);
+
+  // Enable Task Watchdog for the loop task (resets ESP if loop hangs)
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(NULL);  // Add current task (loopTask)
 
   // Load config from flash
   prefs.begin("uart-bridge", true);
@@ -447,6 +526,16 @@ void setup() {
 
 // ====== Loop ======
 void loop() {
+  // Feed the watchdog
+  esp_task_wdt_reset();
+
+  // Safe restart: wait for network stack to flush before rebooting
+  if (restartRequestedMs > 0 && (millis() - restartRequestedMs) > 1000) {
+    Serial.println("Restarting...");
+    Serial.flush();
+    ESP.restart();
+  }
+
   server.handleClient();
   webSocket.loop();
 

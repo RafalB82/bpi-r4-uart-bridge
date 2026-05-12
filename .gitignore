@@ -2,3 +2,6 @@
 *.o
 *.su
 
+# Release binaries — use GitHub Releases for distribution, not git
+release/*.bin
+release/*.zip
