@@ -8,6 +8,8 @@ ESP32 firmware that turns your ESP32 into a WiFi-to-UART bridge for debugging th
 - TCP bridge on port 8888 (`nc <ip> 8888`)
 - WiFi configuration via web (AP mode on first boot)
 - Settings saved to flash (NVS)
+- Task Watchdog for reliability (auto-reset on hang)
+- Input validation (SSID/password length, baud range)
 - No hardcoded credentials
 
 ## First use
@@ -33,8 +35,16 @@ BPI-R4 (26pin header)   ESP32 Dev Board
 
 ## Flash
 
+Download the latest release from [GitHub Releases](../../releases), then:
+
 ```bash
-esptool.py --port /dev/ttyUSB0 write_flash \
+./flash.sh /dev/ttyUSB0
+```
+
+Or manually:
+
+```bash
+esptool.py --port /dev/ttyUSB0 --baud 460800 write_flash \
   0x1000 bootloader.bin \
   0x8000 partitions.bin \
   0x10000 firmware.bin
@@ -52,3 +62,38 @@ pio run
 
 - `src/main.cpp` - firmware source
 - `platformio.ini` - PlatformIO project config
+- `release/flash.sh` - flashing helper script
+- `release/README.txt` - release notes and changelog
+
+## Changelog
+
+### v1.4
+- **Security:** XSS fix in `/status.json` (proper JSON escaping)
+- **Security:** SSID/password length validation (WPA2 limits)
+- **Fix:** Safe restart via flag + loop drain (no delay+restart race)
+- **Fix:** Erase-remove idiom for TCP client pruning
+- **Fix:** Static buffer for TCP→UART reads (stack safety)
+- **Fix:** Non-printable char filtering in WebSocket broadcast
+- **Fix:** Ring buffer full warning logged (was silent drop)
+- **Add:** Task Watchdog (10s timeout, auto-resets on hang)
+- **Chore:** `flash.sh` rewritten with error handling
+- **Chore:** Release binaries moved to GitHub Releases
+
+### v1.3
+- mDNS no longer restarted every loop iteration
+- UART RX buffer enlarged (256 → 4096)
+- TCP client vector pre-reserved
+- WiFiEvent logs AP client events
+- `vTaskDelay(1)` for proper FreeRTOS yield
+
+### v1.2
+- mDNS hostname (`bpi-r4-bridge.local`)
+- NVS baud rate validation
+- Increased UART RX buffer
+
+### v1.1
+- TCP bridge on port 8888
+- Multi-client support
+
+### v1.0
+- Initial release

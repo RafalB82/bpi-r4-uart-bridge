@@ -38,6 +38,17 @@ DEFAULT CREDENTIALS
   AP mode (first boot / WiFi failure): BPI-R4-Bridge / config1234
 
 CHANGELOG
+  v1.4 - security: XSS fix in /status.json (proper JSON string escaping)
+         security: SSID/password length validation (WPA2 limits: 32/63 chars)
+         fix: safe restart via flag + loop drain (no more delay+restart race)
+         fix: erase-remove idiom for TCP client pruning (cleaner, no O(n²))
+         fix: static buffer for TCP->UART reads (stack safety, was 4KB on stack)
+         fix: non-printable char filtering in WebSocket broadcast
+         fix: ring buffer full warning logged (was silent data drop)
+         fix: removed dead pendingRestart variable
+         add: Task Watchdog (10s timeout, auto-resets ESP on loop hang)
+         chore: flash.sh rewritten with proper error handling
+         chore: release binaries removed from git (use GitHub Releases)
   v1.3 - fix: mDNS no longer restarted every loop iteration
          fix: UART read buffer enlarged from 256 to 4096 bytes
          fix: TCP client vector pre-reserved (no heap reallocs)
