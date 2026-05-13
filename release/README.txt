@@ -38,6 +38,9 @@ DEFAULT CREDENTIALS
   AP mode (first boot / WiFi failure): BPI-R4-Bridge / config1234
 
 CHANGELOG
+  v1.5 - fix: non-blocking WiFi connect (no longer blocks loop for 20s, avoids WDT reset)
+         fix: Serial2.setTimeout(5ms) prevents readBytes() from blocking loop up to 1s
+         fix: baud rate whitelist (standard values only: 9600-921600)
   v1.4 - security: XSS fix in /status.json (proper JSON string escaping)
          security: SSID/password length validation (WPA2 limits: 32/63 chars)
          fix: safe restart via flag + loop drain (no more delay+restart race)

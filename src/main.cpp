@@ -11,6 +11,9 @@
  *   Pin 10 (UART0 RX)-> GPIO17 (TX2)
  *   Pin 9 (GND)      -> GND
  *
+ * v1.5 - fix: non-blocking WiFi connect (no longer blocks loop for 20s / risks WDT reset)
+ *        fix: Serial2.setTimeout(5ms) to prevent readBytes() blocking loop
+ *        fix: baud rate whitelist (standard values only, no garbage like 12345)
  * v1.4 - fix: XSS in /status.json (proper JSON escaping),
  *        fix: removed dead pendingRestart variable,
  *        fix: safe restart via flag + loop drain (no more delay+restart race),
@@ -38,7 +41,7 @@
 #include <vector>
 #include <algorithm>
 
-#define FIRMWARE_VERSION "1.4"
+#define FIRMWARE_VERSION "1.5"
 #define TCP_PORT 8888
 #define HTTP_PORT 80
 #define WEBSOCKET_PORT 81
@@ -48,7 +51,7 @@
 #define UART_BUF_SIZE 4096
 #define UART_RX_BUF_SIZE 4096
 #define HOSTNAME "bpi-r4-bridge"
-#define WIFI_TIMEOUT_MS 20000
+#define WIFI_CONNECT_TIMEOUT_MS 20000
 #define MAX_TCP_CLIENTS 4
 
 #define WDT_TIMEOUT_S 10
@@ -68,8 +71,25 @@ unsigned long wifiReconnectMs = 0;
 bool wifiWasConnected = false;
 unsigned long restartRequestedMs = 0;  // non-zero = restart pending
 
+// Non-blocking WiFi connect state
+unsigned long wifiConnectStartMs = 0;  // non-zero = connection in progress
+bool wifiConnecting = false;
+
 // Queue for WebSocket -> UART data (avoids race in callback)
 static RingbufHandle_t uart_tx_queue = NULL;
+
+// Standard baud rate whitelist
+static const unsigned long VALID_BAUD_RATES[] = {
+  9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
+};
+static const int NUM_BAUD_RATES = sizeof(VALID_BAUD_RATES) / sizeof(VALID_BAUD_RATES[0]);
+
+bool isValidBaud(unsigned long baud) {
+  for (int i = 0; i < NUM_BAUD_RATES; i++) {
+    if (VALID_BAUD_RATES[i] == baud) return true;
+  }
+  return false;
+}
 
 // ====== HTML ======
 const char index_html[] PROGMEM = R"rawliteral(
@@ -100,7 +120,7 @@ button:hover{background:#c73650}
 .page.active{display:block}
 </style>
 </head><body>
-<h1>BPI-R4 UART Bridge v1.4</h1>
+<h1>BPI-R4 UART Bridge v1.5</h1>
 <p>IP: <span id="ip">---</span> | TCP: <span id="tcp">port 8888</span></p>
 <div class="tabs">
 <button class="tab active" onclick="showPage('terminal')">Terminal</button>
@@ -196,6 +216,7 @@ document.getElementById('bf').addEventListener('submit', function(e){
 void initUart() {
   Serial2.setRxBufferSize(UART_RX_BUF_SIZE);
   Serial2.begin(uart_baud, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  Serial2.setTimeout(5);  // readBytes() returns quickly instead of blocking up to 1s
   Serial.println("UART2 ready: " + String(uart_baud) + " baud");
 }
 
@@ -236,31 +257,48 @@ void startAP() {
   Serial.println("Connect and open http://192.168.4.1/");
 }
 
-// ====== WiFi connect with hostname + timeout ======
-bool connectWiFi(String ssid, String pass) {
-  if (ssid.length() == 0) return false;
+// ====== Start non-blocking WiFi connect ======
+void startWiFiConnect(String ssid, String pass) {
+  if (ssid.length() == 0) return;
 
-  // Set hostname before WiFi.begin() so DHCP sees it
   WiFi.setHostname(HOSTNAME);
-
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   Serial.print("Connecting to WiFi \"" + ssid + "\" as " + String(HOSTNAME));
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_TIMEOUT_MS) {
-    delay(200);
-    Serial.print(".");
-  }
-  Serial.println();
+  wifiConnectStartMs = millis();
+  wifiConnecting = true;
+}
+
+// ====== Check non-blocking WiFi connect progress (called from loop) ======
+// Returns: 0 = still connecting, 1 = connected, -1 = failed/timeout
+int checkWiFiConnect() {
+  if (!wifiConnecting) return 0;
 
   if (WiFi.status() == WL_CONNECTED) {
+    wifiConnecting = false;
+    Serial.println();
     Serial.println("Connected: " + WiFi.localIP().toString());
     Serial.println("Hostname: " + String(HOSTNAME) + ".local");
-    return true;
+    return 1;
   }
-  Serial.println("Failed to connect");
-  return false;
+
+  // Print progress dots (non-blocking)
+  static unsigned long lastDotMs = 0;
+  if (millis() - lastDotMs >= 500) {
+    Serial.print(".");
+    lastDotMs = millis();
+  }
+
+  // Timeout
+  if (millis() - wifiConnectStartMs >= WIFI_CONNECT_TIMEOUT_MS) {
+    wifiConnecting = false;
+    Serial.println();
+    Serial.println("Failed to connect");
+    return -1;
+  }
+
+  return 0;
 }
 
 // ====== Web handlers ======
@@ -310,8 +348,8 @@ void handleBaud() {
     return;
   }
   unsigned long baud = server.arg("baud").toInt();
-  if (baud < 1200 || baud > 921600) {
-    server.send(400, "text/plain", "Invalid baud rate (1200-921600)");
+  if (!isValidBaud(baud)) {
+    server.send(400, "text/plain", "Invalid baud rate (valid: 9600-921600 standard values)");
     return;
   }
 
@@ -462,8 +500,8 @@ void setup() {
   uart_baud = prefs.getUInt("baud", UART_BAUD_DEFAULT);
   prefs.end();
 
-  // Validate baud rate from NVS (could be corrupted)
-  if (uart_baud < 1200 || uart_baud > 921600) {
+  // Validate baud rate from NVS (could be corrupted) — whitelist only
+  if (!isValidBaud(uart_baud)) {
     uart_baud = UART_BAUD_DEFAULT;
     Serial.println("Invalid baud in NVS, falling back to " + String(uart_baud));
   }
@@ -480,25 +518,15 @@ void setup() {
   // WiFi event handler (before connect, to catch GOT_IP for mDNS)
   WiFi.onEvent(WiFiEvent);
 
-  // Connect or start AP
+  // Start WiFi connect (non-blocking) or fall back to AP
   if (wifi_ssid.length() > 0) {
-    if (!connectWiFi(wifi_ssid, wifi_pass)) {
-      startAP();
-    }
+    startWiFiConnect(wifi_ssid, wifi_pass);
   } else {
     startAP();
   }
 
-  // Start mDNS if we got an IP (STA mode)
-  if (WiFi.status() == WL_CONNECTED) {
-    if (MDNS.begin(HOSTNAME)) {
-      MDNS.addService("http", "tcp", HTTP_PORT);
-      MDNS.addService("ws", "tcp", WEBSOCKET_PORT);
-      Serial.printf("mDNS responder started: http://%s.local/\n", HOSTNAME);
-    } else {
-      Serial.println("mDNS responder failed to start");
-    }
-  }
+  // mDNS will be started in loop() once WiFi connects (non-blocking)
+  mdnsRunning = false;
 
   // Web server
   server.on("/", handleRoot);
@@ -520,8 +548,7 @@ void setup() {
   // Pre-reserve TCP client slots to avoid repeated heap reallocs
   tcpClients.reserve(MAX_TCP_CLIENTS);
 
-  wifiWasConnected = (WiFi.status() == WL_CONNECTED);
-  mdnsRunning = (WiFi.status() == WL_CONNECTED);
+  wifiWasConnected = false;
 }
 
 // ====== Loop ======
@@ -557,11 +584,27 @@ void loop() {
     }
   }
 
-  // WiFi reconnect check
+  // Check non-blocking WiFi connect progress
+  int connResult = checkWiFiConnect();
+  if (connResult == 1) {
+    // WiFi connected — start mDNS and services
+    if (!mdnsRunning && MDNS.begin(HOSTNAME)) {
+      MDNS.addService("http", "tcp", HTTP_PORT);
+      MDNS.addService("ws", "tcp", WEBSOCKET_PORT);
+      Serial.printf("mDNS responder started: http://%s.local/\n", HOSTNAME);
+      mdnsRunning = true;
+    }
+    wifiWasConnected = true;
+  } else if (connResult == -1) {
+    // WiFi connect failed — fall back to AP mode
+    startAP();
+  }
+
+  // WiFi reconnect check (for post-initial-connect drops)
   checkReconnect();
 
-  // Start mDNS once after (re)connect — not every iteration
-  if (WiFi.status() == WL_CONNECTED && !mdnsRunning) {
+  // Start mDNS after (re)connect — not every iteration
+  if (WiFi.status() == WL_CONNECTED && !mdnsRunning && !wifiConnecting) {
     if (MDNS.begin(HOSTNAME)) {
       MDNS.addService("http", "tcp", HTTP_PORT);
       MDNS.addService("ws", "tcp", WEBSOCKET_PORT);

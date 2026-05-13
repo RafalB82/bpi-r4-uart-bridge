@@ -67,6 +67,11 @@ pio run
 
 ## Changelog
 
+### v1.5
+- **Fix:** Non-blocking WiFi connect (no longer blocks loop for up to 20s — was risking WDT reset)
+- **Fix:** `Serial2.setTimeout(5ms)` — `readBytes()` returns quickly instead of potentially blocking up to 1s
+- **Fix:** Baud rate whitelist — only standard values accepted (9600–921600), no garbage like `12345`
+
 ### v1.4
 - **Security:** XSS fix in `/status.json` (proper JSON escaping)
 - **Security:** SSID/password length validation (WPA2 limits)
